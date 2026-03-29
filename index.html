@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Smart Target - Quick Scan Pro</title>
+    <title>Smart Target - 3s Temporal Engine</title>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/localforage/1.10.0/localforage.min.js"></script>
     
@@ -71,7 +71,7 @@
             </div>
             <div style="display:flex; gap:10px;">
                 <button id="btnBaseline" onclick="setBaseline()" disabled>📸 Set Baseline</button>
-                <button id="btnNewShot" class="btn-green" onclick="startQuickScan()" disabled>🔴 Quick Scan</button>
+                <button id="btnNewShot" class="btn-green" onclick="startFullScan()" disabled>🔴 Scan Target (3s)</button>
             </div>
         </div>
 
@@ -99,13 +99,11 @@
     let orb = null, matcher = null, refKP = null, refDesc = null, refGray = null;
     let cropSize = 0, targetRadius = 0, targetCenter = { x: 0, y: 0 };
     
-    // TEMPORAL TRACKING FIX: Frame count instead of Time Limit
     const PROXIMITY = 15.0;
-    const REQ_FRAMES = 3;  // Must see the hole in 3 out of 5 frames
-    const MAX_FRAMES = 5;  // Grabs exactly 5 frames, regardless of how long it takes
-    let framesProcessed = 0;
+    const REQ_FRAMES = 5; // Higher requirement for better accuracy over 3 seconds
     let candidates = [];
     let isScanning = false;
+    let scanStartTime = 0;
 
     async function onOpenCvReady() {
         try {
@@ -314,32 +312,33 @@
         frame.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); mask.delete(); roi.delete();
     }
 
-    function startQuickScan() {
+    // --- 3-SECOND SCAN LOGIC ---
+    function startFullScan() {
         if (!refGray) return;
         
         let btn = document.getElementById('btnNewShot');
-        // Phase 1: Settling
+        // Settle for 1s
         btn.innerText = "SETTLING...";
         btn.style.background = "#ffaa00"; 
         btn.style.color = "black";
         btn.disabled = true;
         document.getElementById('btnBaseline').disabled = true;
         
-        document.getElementById('status').innerText = "Hands off! Stabilizing...";
+        document.getElementById('status').innerText = "Stabilizing...";
         document.getElementById('status').style.color = "#ffaa00";
 
         setTimeout(() => {
-            // Phase 2: Scanning exactly 5 frames
-            btn.innerText = "SCANNING...";
+            // Scan for 3s
+            btn.innerText = "SCANNING (3s)...";
             btn.style.background = "#ff3b30"; 
             btn.style.color = "white";
             
-            document.getElementById('status').innerText = "Analyzing frames...";
+            document.getElementById('status').innerText = "Hold steady!";
             document.getElementById('status').style.color = "#ff3b30";
 
             candidates = []; 
-            framesProcessed = 0;
             isScanning = true;
+            scanStartTime = performance.now();
             
             scanLoop();
         }, 1000);
@@ -348,13 +347,17 @@
     function scanLoop() {
         if (!isScanning) return;
 
-        if (framesProcessed >= MAX_FRAMES) {
+        let now = performance.now();
+        if (now - scanStartTime > 3000) {
             endScan();
             return;
         }
 
         processFrame();
-        framesProcessed++;
+        
+        // Slower decay for the 3s window to allow for more frames to accumulate
+        candidates.forEach(c => { c.f -= 0.05; });
+        candidates = candidates.filter(c => c.f > 0);
 
         requestAnimationFrame(scanLoop);
     }
@@ -423,13 +426,8 @@
                                 let finalX = dP.data64F[0]/dP.data64F[2];
                                 let finalY = dP.data64F[1]/dP.data64F[2];
                                 
-                                // Directly count the hole if it exists, without complex decay math
                                 let c = candidates.find(can => Math.hypot(can.x - finalX, can.y - finalY) < PROXIMITY);
-                                if (c) { 
-                                    c.f++; 
-                                } else { 
-                                    candidates.push({x: finalX, y: finalY, f: 1}); 
-                                }
+                                if (c) { c.f++; } else { candidates.push({x: finalX, y: finalY, f: 1}); }
                                 
                                 pFull.delete(); dP.delete();
                             }
@@ -448,8 +446,6 @@
         const target = targets.find(t => t.id === activeTargetId);
         
         let knownHoles = target.scans.flatMap(s => s.holes);
-        
-        // Hole must appear in at least 3 out of the 5 frames grabbed
         let confirmedHoles = candidates.filter(c => c.f >= REQ_FRAMES);
         let newValidHoles = [];
 
@@ -462,61 +458,47 @@
 
         if (newValidHoles.length > 0) {
             let scanNumber = target.scans.length + 1;
-            target.scans.push({
-                id: Date.now().toString(),
-                name: `Scan ${scanNumber}`,
-                holes: newValidHoles
-            });
+            target.scans.push({ id: Date.now().toString(), name: `Scan ${scanNumber}`, holes: newValidHoles });
             saveToPhone();
             renderScansList();
         }
 
         drawTargetState(target);
 
-        // Reset UI
         let btn = document.getElementById('btnNewShot');
-        btn.innerText = "🔴 Quick Scan";
+        btn.innerText = "🔴 Scan Target (3s)";
         btn.style.background = ""; 
         btn.style.color = "";
         btn.classList.add("btn-green");
         btn.disabled = false;
         document.getElementById('btnBaseline').disabled = false;
         
-        if (newValidHoles.length > 0) {
-            document.getElementById('status').innerText = `Scan Complete. ${newValidHoles.length} New Shots.`;
-            document.getElementById('status').style.color = "#00ff00";
-        } else {
-            document.getElementById('status').innerText = `Scan Complete. No new shots found.`;
-            document.getElementById('status').style.color = "#ffaa00";
-        }
+        document.getElementById('status').innerText = `Scan Complete. ${newValidHoles.length} New Shots.`;
+        document.getElementById('status').style.color = "#00ff00";
     }
 
-    // --- UI DRAWING ---
     function drawTargetState(target) {
         let cvs = document.getElementById('displayCanvas');
         let ctx = cvs.getContext('2d');
         ctx.clearRect(0, 0, procW, procH);
         
         if (!target || !target.scans) return;
-
         let totalScans = target.scans.length;
 
         target.scans.forEach((scan, index) => {
             let isLastScan = (index === totalScans - 1);
-
             scan.holes.forEach(h => {
                 ctx.beginPath();
                 ctx.arc(h.x, h.y, 8, 0, 6.28); 
                 ctx.lineWidth = 3;
-                
                 if (isLastScan) {
-                    ctx.strokeStyle="rgba(0,255,0,0.9)"; // Green
+                    ctx.strokeStyle="rgba(0,255,0,0.9)"; 
                     ctx.stroke();
                     ctx.moveTo(h.x - 12, h.y); ctx.lineTo(h.x + 12, h.y);
                     ctx.moveTo(h.x, h.y - 12); ctx.lineTo(h.x, h.y + 12);
                     ctx.stroke();
                 } else {
-                    ctx.strokeStyle="rgba(255,0,0,0.8)"; // Red
+                    ctx.strokeStyle="rgba(255,0,0,0.8)"; 
                     ctx.stroke();
                 }
             });
