@@ -71,7 +71,7 @@
             </div>
             <div style="display:flex; gap:10px;">
                 <button id="btnBaseline" onclick="setBaseline()" disabled>📸 Set Baseline</button>
-                <button id="btnNewShot" class="btn-green" onclick="startQuickScan()" disabled>🔴 Quick Scan (0.5s)</button>
+                <button id="btnNewShot" class="btn-green" onclick="startQuickScan()" disabled>🔴 Quick Scan</button>
             </div>
         </div>
 
@@ -99,11 +99,13 @@
     let orb = null, matcher = null, refKP = null, refDesc = null, refGray = null;
     let cropSize = 0, targetRadius = 0, targetCenter = { x: 0, y: 0 };
     
+    // TEMPORAL TRACKING FIX: Frame count instead of Time Limit
     const PROXIMITY = 15.0;
-    const REQ_FRAMES = 4; // Still requires 4 good frames, even in the 0.5s window
+    const REQ_FRAMES = 3;  // Must see the hole in 3 out of 5 frames
+    const MAX_FRAMES = 5;  // Grabs exactly 5 frames, regardless of how long it takes
+    let framesProcessed = 0;
     let candidates = [];
     let isScanning = false;
-    let scanStartTime = 0;
 
     async function onOpenCvReady() {
         try {
@@ -312,14 +314,13 @@
         frame.delete(); gray.delete(); thresh.delete(); contours.delete(); hierarchy.delete(); mask.delete(); roi.delete();
     }
 
-    // --- THE NEW QUICK SCAN WITH SETTLING DELAY ---
     function startQuickScan() {
         if (!refGray) return;
         
         let btn = document.getElementById('btnNewShot');
         // Phase 1: Settling
         btn.innerText = "SETTLING...";
-        btn.style.background = "#ffaa00"; // Orange
+        btn.style.background = "#ffaa00"; 
         btn.style.color = "black";
         btn.disabled = true;
         document.getElementById('btnBaseline').disabled = true;
@@ -327,19 +328,18 @@
         document.getElementById('status').innerText = "Hands off! Stabilizing...";
         document.getElementById('status').style.color = "#ffaa00";
 
-        // Wait exactly 1 second for tap wobble to dissipate
         setTimeout(() => {
-            // Phase 2: Scanning
+            // Phase 2: Scanning exactly 5 frames
             btn.innerText = "SCANNING...";
-            btn.style.background = "#ff3b30"; // Red
+            btn.style.background = "#ff3b30"; 
             btn.style.color = "white";
             
-            document.getElementById('status').innerText = "Processing frames...";
+            document.getElementById('status').innerText = "Analyzing frames...";
             document.getElementById('status').style.color = "#ff3b30";
 
             candidates = []; 
+            framesProcessed = 0;
             isScanning = true;
-            scanStartTime = performance.now();
             
             scanLoop();
         }, 1000);
@@ -348,16 +348,13 @@
     function scanLoop() {
         if (!isScanning) return;
 
-        let now = performance.now();
-        // Lightning fast 0.5-second (500ms) window
-        if (now - scanStartTime > 500) {
+        if (framesProcessed >= MAX_FRAMES) {
             endScan();
             return;
         }
 
         processFrame();
-        candidates.forEach(c => { c.f -= 0.1; });
-        candidates = candidates.filter(c => c.f > 0);
+        framesProcessed++;
 
         requestAnimationFrame(scanLoop);
     }
@@ -426,8 +423,13 @@
                                 let finalX = dP.data64F[0]/dP.data64F[2];
                                 let finalY = dP.data64F[1]/dP.data64F[2];
                                 
+                                // Directly count the hole if it exists, without complex decay math
                                 let c = candidates.find(can => Math.hypot(can.x - finalX, can.y - finalY) < PROXIMITY);
-                                if (c) { c.f++; } else { candidates.push({x: finalX, y: finalY, f: 1}); }
+                                if (c) { 
+                                    c.f++; 
+                                } else { 
+                                    candidates.push({x: finalX, y: finalY, f: 1}); 
+                                }
                                 
                                 pFull.delete(); dP.delete();
                             }
@@ -446,6 +448,8 @@
         const target = targets.find(t => t.id === activeTargetId);
         
         let knownHoles = target.scans.flatMap(s => s.holes);
+        
+        // Hole must appear in at least 3 out of the 5 frames grabbed
         let confirmedHoles = candidates.filter(c => c.f >= REQ_FRAMES);
         let newValidHoles = [];
 
@@ -471,8 +475,8 @@
 
         // Reset UI
         let btn = document.getElementById('btnNewShot');
-        btn.innerText = "🔴 Quick Scan (0.5s)";
-        btn.style.background = ""; // Restore class styling
+        btn.innerText = "🔴 Quick Scan";
+        btn.style.background = ""; 
         btn.style.color = "";
         btn.classList.add("btn-green");
         btn.disabled = false;
